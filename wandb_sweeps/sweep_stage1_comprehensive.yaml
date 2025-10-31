@@ -1,0 +1,55 @@
+name: stage1_comprehensive_sweep
+method: random
+metric:
+  name: eval_f1  # Using validation F1 for optimization (logged as eval_f1 by Trainer)
+  goal: maximize
+
+parameters:
+  fold:
+    values: [3]  # Same strategy as Stage 2: sweep on folds 1 and 3
+  
+  wandb-group:
+    values: [stage1-comprehensive-sweep]
+  
+  optim:
+    values: [adamw_torch_fused]
+  
+  # Regularization parameters
+  label-smoothing:
+    distribution: uniform
+    min: 0.0
+    max: 0.15
+  
+  focal-gamma:
+    distribution: uniform
+    min: 0.0
+    max: 3.0
+  
+  # Optimizer parameters
+  learning-rate:
+    distribution: log_uniform_values
+    min: 1e-5
+    max: 1e-4
+  
+  weight-decay:
+    distribution: log_uniform_values
+    min: 1e-3
+    max: 0.1
+  
+  warmup-ratio:
+    distribution: uniform
+    min: 0.05
+    max: 0.25
+  
+  adam-beta2:
+    distribution: uniform
+    min: 0.95
+    max: 0.999
+
+command:
+  - ${env}
+  - python3
+  - ${program}
+  - ${args}
+
+program: train_ast_stage1_cross_validation.py
