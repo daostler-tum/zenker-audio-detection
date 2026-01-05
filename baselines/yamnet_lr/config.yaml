@@ -1,0 +1,15 @@
+task: binary_stage2
+sample_rate: 16000
+clip_duration_s: 1.0
+embedding:
+  aggregate: [mean, max]
+  cache: true
+classifier:
+  type: logistic_regression
+  C: 1.0
+  class_weight: balanced
+patient_aggregation:
+  threshold: 0.5
+  methods: [mean_prob, majority_vote]
+threshold_tuning:
+  enabled: true
