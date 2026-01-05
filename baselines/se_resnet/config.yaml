@@ -1,0 +1,18 @@
+task: binary_stage2
+spectrogram:
+  height: 256
+  width: 346
+  pad_value: -80.0
+  normalize: true
+  mean: -63.333866
+  std: 17.661556
+model:
+  use_se: true
+train:
+  batch_size: 32
+  epochs: 100
+  learning_rate: 5e-6
+  early_stopping:
+    enabled: true
+    patience: 10
+  val_split_if_missing: 0.1

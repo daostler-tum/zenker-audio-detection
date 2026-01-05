@@ -25,6 +25,7 @@ def main() -> None:
         "--output_dir", default=os.path.join(os.path.dirname(__file__), "runs")
     )
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--n_folds", type=int, default=5)
     ap.add_argument("--n_splits", type=int, dest="n_folds", help=argparse.SUPPRESS)
     ap.add_argument(
@@ -35,9 +36,14 @@ def main() -> None:
     )
     ap.add_argument(
         "--task",
-        choices=["binary_stage2", "multiclass"],
+        choices=["binary_stage1", "binary_stage2", "multiclass"],
         default=None,
-        help="Override task for baselines that support it (mfcc_svm, yamnet_lr).",
+        help="Override task for baselines that support it (mfcc_svm, yamnet_lr, se_resnet).",
+    )
+    ap.add_argument(
+        "--spectrogram_root",
+        default=None,
+        help="Spectrogram root for se_resnet baseline (folder containing class/patient/*.npy).",
     )
     ap.add_argument("--run_name", default=None)
     args = ap.parse_args()
@@ -48,6 +54,7 @@ def main() -> None:
         ("mfcc_svm", "baselines/mfcc_svm/train.py"),
         ("resnet_mel", "baselines/resnet_mel/train.py"),
         ("yamnet_lr", "baselines/yamnet_lr/train.py"),
+        ("se_resnet", "baselines/se_resnet/train.py"),
     ]
 
     for name, script in baselines:
@@ -65,12 +72,19 @@ def main() -> None:
         ]
         if args.fold is not None:
             cmd.extend(["--fold", str(args.fold)])
+        if bool(args.dry_run):
+            cmd.append("--dry_run")
         if args.data_root is not None:
             cmd.extend(["--data_root", args.data_root])
         if args.label_csv is not None:
             cmd.extend(["--label_csv", args.label_csv])
         if args.task is not None and name in ("mfcc_svm", "yamnet_lr"):
+            if args.task in ("binary_stage2", "multiclass"):
+                cmd.extend(["--task", args.task])
+        if args.task is not None and name == "se_resnet":
             cmd.extend(["--task", args.task])
+        if args.spectrogram_root is not None and name == "se_resnet":
+            cmd.extend(["--spectrogram_root", args.spectrogram_root])
 
         _run(cmd)
 

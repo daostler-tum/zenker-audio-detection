@@ -335,6 +335,7 @@ def main() -> None:
     ap.add_argument("--label_csv", default=None)
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--n_folds", type=int, default=5)
     ap.add_argument("--n_splits", type=int, dest="n_folds", help=argparse.SUPPRESS)
     ap.add_argument(
@@ -389,11 +390,11 @@ def main() -> None:
             [int(args.fold)] if args.fold is not None else list(range(1, n_folds + 1))
         )
         for fold in folds_to_run:
-            x_tr, y_tr = data.load_predefined_fold_from_numpy(
-                folds_dir=predefined_dir, fold=fold, split="train"
-            )
-            x_te, y_te = data.load_predefined_fold_from_numpy(
-                folds_dir=predefined_dir, fold=fold, split="test"
+            (x_tr, y_tr), _, (x_te, y_te) = data.load_predefined_fold_splits(
+                folds_dir=predefined_dir,
+                fold=fold,
+                task=cfg_task,
+                dry_run=bool(args.dry_run),
             )
 
             p_tr = [data.parse_patient_id(p) for p in x_tr]

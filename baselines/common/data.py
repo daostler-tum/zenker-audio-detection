@@ -239,3 +239,60 @@ def load_predefined_fold_from_numpy(
     xs = np.load(x_path, allow_pickle=True).tolist()
     ys = np.load(y_path, allow_pickle=True).astype(int).tolist()
     return [str(x) for x in xs], [int(y) for y in ys]
+
+
+def load_predefined_fold_splits(
+    *,
+    folds_dir: str,
+    fold: int,
+    task: str,
+    dry_run: bool,
+    dry_run_size: int = 32,
+) -> Tuple[
+    Tuple[List[str], List[int]],
+    Optional[Tuple[List[str], List[int]]],
+    Tuple[List[str], List[int]],
+]:
+    train_x, train_y = load_predefined_fold_from_numpy(
+        folds_dir=folds_dir, fold=fold, split="train"
+    )
+    test_x, test_y = load_predefined_fold_from_numpy(
+        folds_dir=folds_dir, fold=fold, split="test"
+    )
+
+    val_x_path = os.path.join(folds_dir, f"val_x_fold{fold}.npy")
+    val_y_path = os.path.join(folds_dir, f"val_y_fold{fold}.npy")
+    has_val = os.path.exists(val_x_path) and os.path.exists(val_y_path)
+    val: Optional[Tuple[List[str], List[int]]] = None
+    if has_val:
+        val_x = np.load(val_x_path, allow_pickle=True).tolist()
+        val_y = np.load(val_y_path, allow_pickle=True).astype(int).tolist()
+        val = ([str(x) for x in val_x], [int(y) for y in val_y])
+
+    if dry_run:
+        train_x, train_y = train_x[:dry_run_size], train_y[:dry_run_size]
+        test_x, test_y = test_x[:dry_run_size], test_y[:dry_run_size]
+        if val is not None:
+            vx, vy = val
+            val = (vx[:dry_run_size], vy[:dry_run_size])
+
+    allowed_labels: Optional[Tuple[int, ...]]
+    if task in ("binary_stage2", "binary_stage1"):
+        allowed_labels = (0, 1)
+    elif task == "multiclass":
+        allowed_labels = (0, 1, 2)
+    else:
+        allowed_labels = None
+
+    for name, arr in [("train_y", train_y), ("test_y", test_y)] + (
+        [("val_y", val[1])] if val is not None else []
+    ):
+        uniq = sorted(set(arr))
+        if allowed_labels is not None and any(
+            label not in allowed_labels for label in uniq
+        ):
+            raise ValueError(f"Unexpected labels in {name} fold {fold}: {uniq}")
+        if len(uniq) < 2:
+            print(f"[WARN] Fold {fold} {name} single class: {uniq}")
+
+    return (train_x, train_y), val, (test_x, test_y)

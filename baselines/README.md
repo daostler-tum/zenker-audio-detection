@@ -117,6 +117,39 @@ python baselines/yamnet_lr/train.py \
   --task multiclass
 ```
 
+## Baseline D: SE-ResNet on precomputed spectrograms
+
+This baseline reuses the SE-ResNet (Keras) implementation and trains on **precomputed mel-spectrograms saved as `.npy`**.
+
+Requirements:
+
+- `tensorflow` (not included in `requirements.txt`)
+- Spectrograms stored under a root directory in the same class/patient structure as the dataset, e.g.
+  `/home/ksvoai/source/datasets/spectrograms/New_SwallowSet_Test/<Class>/<Patient>/<file_stem>.npy`
+
+Run (binary stage2 by default using `data_ast_stage2/` when present):
+
+```bash
+python baselines/se_resnet/train.py \
+  --output_dir baselines/runs \
+  --seed 42 \
+  --n_folds 5 \
+  --task binary_stage2 \
+  --spectrogram_root /home/ksvoai/source/datasets/spectrograms/New_SwallowSet_Test/
+```
+
+Run only fold 3:
+
+```bash
+python baselines/se_resnet/train.py \
+  --output_dir baselines/runs \
+  --seed 42 \
+  --n_folds 5 \
+  --fold 3 \
+  --task binary_stage2 \
+  --spectrogram_root /home/ksvoai/source/datasets/spectrograms/New_SwallowSet_Test/
+```
+
 ## Run all baselines
 
 ```bash

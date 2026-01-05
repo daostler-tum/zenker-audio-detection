@@ -224,6 +224,28 @@ def find_best_threshold_f1(y_true: np.ndarray, y_proba: np.ndarray) -> float:
     return best_t
 
 
+def classification_report_dict(
+    *,
+    y_true: Sequence[int],
+    y_pred: Sequence[int],
+    target_names: Sequence[str],
+) -> Optional[Dict[str, Any]]:
+    try:
+        from sklearn.metrics import classification_report
+
+        return classification_report(
+            y_true,
+            y_pred,
+            labels=list(range(len(target_names))),
+            target_names=list(target_names),
+            digits=4,
+            output_dict=True,
+            zero_division=0,
+        )
+    except Exception:
+        return None
+
+
 def save_confusion_matrix_png(
     *,
     y_true: Sequence[int],
