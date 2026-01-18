@@ -46,13 +46,19 @@ def binary_metrics(
 
     if y_proba is not None:
         try:
-            from sklearn.metrics import average_precision_score, roc_auc_score
+            from sklearn.metrics import (
+                average_precision_score,
+                brier_score_loss,
+                roc_auc_score,
+            )
 
             out["auroc"] = float(roc_auc_score(y_true, y_proba))
             out["auprc"] = float(average_precision_score(y_true, y_proba))
+            out["brier"] = float(brier_score_loss(y_true, y_proba))
         except Exception:
             out["auroc"] = None
             out["auprc"] = None
+            out["brier"] = None
 
     return out
 

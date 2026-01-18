@@ -190,53 +190,51 @@ class FoldResult:
     fold: int
     threshold_fixed: Optional[float]
     threshold_train_best: Optional[float]
+    threshold_best_effective: Optional[float]
     metrics_snippet_fixed: Dict[str, Any]
     metrics_patient_fixed_mean: Dict[str, Any]
     metrics_patient_fixed_vote: Dict[str, Any]
     metrics_snippet_best: Dict[str, Any]
     metrics_patient_best_mean: Dict[str, Any]
     metrics_patient_best_vote: Dict[str, Any]
+    report_snippet_fixed: Optional[Dict[str, Any]]
+    report_snippet_best: Optional[Dict[str, Any]]
 
 
 def run_fold(
     *,
     fold: int,
-    train_wavs: List[str],
-    train_y: List[int],
-    train_pids: List[str],
-    val_wavs: Optional[List[str]],
-    val_y: Optional[List[int]],
-    val_pids: Optional[List[str]],
-    test_wavs: List[str],
-    test_y: List[int],
-    test_pids: List[str],
+    task: str,
+    predefined_dir: str,
+    spectrogram_root: str,
     cfg: Dict[str, Any],
     run_dir: str,
-    spectrogram_root: str,
     seed: int,
+    dry_run: bool,
     compute_patient_metrics: bool,
-    tf,
+    eval_only: bool,
 ) -> FoldResult:
     from baselines.se_resnet.resnet import ResNet18
+
+    tf = _require_tensorflow()
 
     fold_dir = os.path.join(run_dir, f"fold{fold}")
     os.makedirs(fold_dir, exist_ok=True)
 
-    task = str(cfg.get("task", "binary_stage2"))
-    if task not in ("binary_stage2", "binary_stage1", "multiclass"):
-        raise ValueError(f"Unsupported task: {task}")
+    (x_tr, y_tr), val, (x_te, y_te) = data.load_predefined_fold_splits(
+        folds_dir=predefined_dir,
+        fold=fold,
+        task=task,
+        dry_run=dry_run,
+    )
 
-    if task == "binary_stage2":
-        labels_plot = ["Healthy", "Zenker"]
-    elif task == "binary_stage1":
-        labels_plot = ["Idle", "Swallow"]
-    else:
-        labels_plot = ["Idle", "Healthy", "Zenker"]
+    p_tr = [data.parse_patient_id(p) for p in x_tr]
+    p_te = [data.parse_patient_id(p) for p in x_te]
 
-    if task == "multiclass":
-        n_classes = 3
-    else:
-        n_classes = 2
+    x_val: Optional[List[str]] = None
+    y_val: Optional[List[int]] = None
+    if val is not None:
+        x_val, y_val = val
 
     spec_cfg = cfg.get("spectrogram", {})
     height = int(spec_cfg.get("height", 256))
@@ -246,14 +244,14 @@ def run_fold(
     mean = float(spec_cfg.get("mean", -63.333866))
     std = float(spec_cfg.get("std", 17.661556))
 
-    train_specs = _wav_paths_to_specs(train_wavs, spectrogram_root)
-    test_specs = _wav_paths_to_specs(test_wavs, spectrogram_root)
+    train_specs = _wav_paths_to_specs(x_tr, spectrogram_root)
+    test_specs = _wav_paths_to_specs(x_te, spectrogram_root)
 
     if task == "binary_stage2":
-        example_paths = (train_wavs[:16] if len(train_wavs) >= 16 else train_wavs) + (
-            test_wavs[:16] if len(test_wavs) >= 16 else test_wavs
+        example_paths = (x_tr[:16] if len(x_tr) >= 16 else x_tr) + (
+            x_te[:16] if len(x_te) >= 16 else x_te
         )
-        for p, y in zip(example_paths, (train_y[:16] + test_y[:16])):
+        for p, y in zip(example_paths, (y_tr[:16] + y_te[:16])):
             if os.sep + "Zenker" + os.sep in p and int(y) != 1:
                 raise ValueError(
                     "Expected label mapping for binary_stage2 to be Healthy=0, Zenker=1 (Zenker positive), "
@@ -281,13 +279,13 @@ def run_fold(
     tf.random.set_seed(seed)
 
     train_specs_for_threshold = train_specs
-    train_y_for_threshold = train_y
+    train_y_for_threshold = y_tr
 
     seq_train = SpectrogramSequence(
         spec_paths=train_specs,
-        labels=train_y,
+        labels=y_tr,
         batch_size=batch_size,
-        n_classes=n_classes,
+        n_classes=2 if task != "multiclass" else 3,
         shuffle=True,
         height=height,
         width=width,
@@ -299,13 +297,13 @@ def run_fold(
     )
 
     seq_val = None
-    if val_wavs is not None and val_y is not None:
-        val_specs = _wav_paths_to_specs(val_wavs, spectrogram_root)
+    if x_val is not None and y_val is not None:
+        val_specs = _wav_paths_to_specs(x_val, spectrogram_root)
         seq_val = SpectrogramSequence(
             spec_paths=val_specs,
-            labels=val_y,
+            labels=y_val,
             batch_size=batch_size,
-            n_classes=n_classes,
+            n_classes=2 if task != "multiclass" else 3,
             shuffle=False,
             height=height,
             width=width,
@@ -322,16 +320,16 @@ def run_fold(
             sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
             tr_idx, va_idx = next(
                 sgkf.split(
-                    np.zeros(len(train_y)),
-                    np.asarray(train_y),
-                    groups=np.asarray(train_pids),
+                    np.zeros(len(y_tr)),
+                    np.asarray(y_tr),
+                    groups=np.asarray(p_tr),
                 )
             )
         except Exception:
-            tr_idx = np.arange(len(train_y))
+            tr_idx = np.arange(len(y_tr))
             rng = np.random.RandomState(seed)
             rng.shuffle(tr_idx)
-            n_val = max(1, int(round(len(train_y) * val_split)))
+            n_val = max(1, int(round(len(y_tr) * val_split)))
             va_idx = tr_idx[:n_val]
             tr_idx = tr_idx[n_val:]
 
@@ -339,9 +337,9 @@ def run_fold(
         va_idx = np.asarray(va_idx)
         if len(va_idx) > 0 and len(tr_idx) > 0:
             train_specs_split = [train_specs[int(i)] for i in tr_idx]
-            train_y_split = [int(train_y[int(i)]) for i in tr_idx]
+            train_y_split = [int(y_tr[int(i)]) for i in tr_idx]
             val_specs_split = [train_specs[int(i)] for i in va_idx]
-            val_y_split = [int(train_y[int(i)]) for i in va_idx]
+            val_y_split = [int(y_tr[int(i)]) for i in va_idx]
 
             train_specs_for_threshold = train_specs_split
             train_y_for_threshold = train_y_split
@@ -350,7 +348,7 @@ def run_fold(
                 spec_paths=train_specs_split,
                 labels=train_y_split,
                 batch_size=batch_size,
-                n_classes=n_classes,
+                n_classes=2 if task != "multiclass" else 3,
                 shuffle=True,
                 height=height,
                 width=width,
@@ -365,7 +363,7 @@ def run_fold(
                 spec_paths=val_specs_split,
                 labels=val_y_split,
                 batch_size=batch_size,
-                n_classes=n_classes,
+                n_classes=2 if task != "multiclass" else 3,
                 shuffle=False,
                 height=height,
                 width=width,
@@ -380,7 +378,7 @@ def run_fold(
         spec_paths=train_specs_for_threshold,
         labels=train_y_for_threshold,
         batch_size=batch_size,
-        n_classes=n_classes,
+        n_classes=2 if task != "multiclass" else 3,
         shuffle=False,
         height=height,
         width=width,
@@ -392,9 +390,9 @@ def run_fold(
     )
     seq_test = SpectrogramSequence(
         spec_paths=test_specs,
-        labels=test_y,
+        labels=y_te,
         batch_size=batch_size,
-        n_classes=n_classes,
+        n_classes=2 if task != "multiclass" else 3,
         shuffle=False,
         height=height,
         width=width,
@@ -405,7 +403,11 @@ def run_fold(
         tf=tf,
     )
 
-    model = ResNet18(input_shape=(height, width, 1), classes=n_classes, use_se=use_se)
+    model = ResNet18(
+        input_shape=(height, width, 1),
+        classes=2 if task != "multiclass" else 3,
+        use_se=use_se,
+    )
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
     model.compile(
@@ -422,23 +424,31 @@ def run_fold(
             )
         )
 
-    if seq_val is not None:
-        model.fit(
-            seq_train,
-            epochs=epochs,
-            callbacks=callbacks,
-            validation_data=seq_val,
-            verbose=1,
-        )
+    model_path = os.path.join(fold_dir, "model.keras")
+    if eval_only:
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"--eval_only set but missing saved model: {model_path}"
+            )
+        model = tf.keras.models.load_model(model_path, compile=False)
     else:
-        model.fit(seq_train, epochs=epochs, callbacks=callbacks, verbose=1)
+        if seq_val is not None:
+            model.fit(
+                seq_train,
+                epochs=epochs,
+                callbacks=callbacks,
+                validation_data=seq_val,
+                verbose=1,
+            )
+        else:
+            model.fit(seq_train, epochs=epochs, callbacks=callbacks, verbose=1)
 
-    model.save(os.path.join(fold_dir, "model.keras"))
+        model.save(model_path)
 
     y_pred = model.predict(seq_test)
-    y_true = np.asarray(test_y, dtype=int)
+    y_true = np.asarray(y_te, dtype=int)
 
-    if n_classes == 2:
+    if task in ("binary_stage2", "binary_stage1"):
         y_proba = y_pred[:, 1]
         threshold_fixed = 0.5
         y_score_train = model.predict(seq_train_eval)[:, 1]
@@ -469,15 +479,34 @@ def run_fold(
             y_true=y_true, y_pred=y_pred_best, y_proba=y_proba
         )
 
+        utils.save_json(
+            snippet_fixed, os.path.join(fold_dir, "metrics_snippet_fixed.json")
+        )
+        utils.save_json(
+            snippet_best, os.path.join(fold_dir, "metrics_snippet_best.json")
+        )
+        utils.save_json(
+            snippet_fixed.get("confusion", {}),
+            os.path.join(fold_dir, "confusion_counts_snippet_fixed.json"),
+        )
+        utils.save_json(
+            snippet_best.get("confusion", {}),
+            os.path.join(fold_dir, "confusion_counts_snippet_best.json"),
+        )
+
         report_fixed = metrics.classification_report_dict(
             y_true=y_true.tolist(),
             y_pred=y_pred_fixed.tolist(),
-            target_names=labels_plot,
+            target_names=["Healthy", "Zenker"]
+            if task == "binary_stage2"
+            else ["Idle", "Swallow"],
         )
         report_best = metrics.classification_report_dict(
             y_true=y_true.tolist(),
             y_pred=y_pred_best.tolist(),
-            target_names=labels_plot,
+            target_names=["Healthy", "Zenker"]
+            if task == "binary_stage2"
+            else ["Idle", "Swallow"],
         )
         if report_fixed is not None:
             utils.save_json(
@@ -498,7 +527,7 @@ def run_fold(
         if compute_patient_metrics:
             p_yt_mean_fixed, p_yp_mean_fixed, p_pp_mean_fixed, _ = (
                 metrics.aggregate_by_patient(
-                    patient_ids=test_pids,
+                    patient_ids=p_te,
                     y_true=y_true.tolist(),
                     y_proba=y_proba.tolist(),
                     method="mean_prob",
@@ -507,7 +536,7 @@ def run_fold(
             )
             p_yt_vote_fixed, p_yp_vote_fixed, p_pp_vote_fixed, _ = (
                 metrics.aggregate_by_patient(
-                    patient_ids=test_pids,
+                    patient_ids=p_te,
                     y_true=y_true.tolist(),
                     y_proba=y_proba.tolist(),
                     method="majority_vote",
@@ -516,7 +545,7 @@ def run_fold(
             )
             p_yt_mean_best, p_yp_mean_best, p_pp_mean_best, _ = (
                 metrics.aggregate_by_patient(
-                    patient_ids=test_pids,
+                    patient_ids=p_te,
                     y_true=y_true.tolist(),
                     y_proba=y_proba.tolist(),
                     method="mean_prob",
@@ -525,7 +554,7 @@ def run_fold(
             )
             p_yt_vote_best, p_yp_vote_best, p_pp_vote_best, _ = (
                 metrics.aggregate_by_patient(
-                    patient_ids=test_pids,
+                    patient_ids=p_te,
                     y_true=y_true.tolist(),
                     y_proba=y_proba.tolist(),
                     method="majority_vote",
@@ -557,14 +586,18 @@ def run_fold(
         metrics.save_confusion_matrix_png(
             y_true=y_true.tolist(),
             y_pred=y_pred_fixed.tolist(),
-            labels=labels_plot,
+            labels=["Healthy", "Zenker"]
+            if task == "binary_stage2"
+            else ["Idle", "Swallow"],
             out_path=os.path.join(fold_dir, "confusion_snippet_fixed.png"),
             title=f"Fold {fold}",
         )
         metrics.save_confusion_matrix_png(
             y_true=y_true.tolist(),
             y_pred=y_pred_best.tolist(),
-            labels=labels_plot,
+            labels=["Healthy", "Zenker"]
+            if task == "binary_stage2"
+            else ["Idle", "Swallow"],
             out_path=os.path.join(fold_dir, "confusion_snippet_best.png"),
             title=f"Fold {fold}",
         )
@@ -577,6 +610,16 @@ def run_fold(
         )
 
         utils.save_json(snippet_fixed, os.path.join(fold_dir, "metrics_snippet.json"))
+        utils.save_json(
+            {
+                "threshold_fixed": float(threshold_fixed),
+                "threshold_train_best": float(threshold_best)
+                if threshold_best is not None
+                else None,
+                "threshold_best_effective": float(threshold_best_eff),
+            },
+            os.path.join(fold_dir, "thresholds.json"),
+        )
         if compute_patient_metrics:
             utils.save_json(
                 patient_fixed_mean, os.path.join(fold_dir, "metrics_patient_mean.json")
@@ -591,12 +634,15 @@ def run_fold(
             threshold_train_best=(
                 float(threshold_best) if threshold_best is not None else None
             ),
+            threshold_best_effective=float(threshold_best_eff),
             metrics_snippet_fixed=snippet_fixed,
             metrics_patient_fixed_mean=patient_fixed_mean,
             metrics_patient_fixed_vote=patient_fixed_vote,
             metrics_snippet_best=snippet_best,
             metrics_patient_best_mean=patient_best_mean,
             metrics_patient_best_vote=patient_best_vote,
+            report_snippet_fixed=report_fixed,
+            report_snippet_best=report_best,
         )
 
     y_pred_labels = y_pred.argmax(axis=1)
@@ -607,7 +653,7 @@ def run_fold(
     report_mc = metrics.classification_report_dict(
         y_true=y_true.tolist(),
         y_pred=y_pred_labels.tolist(),
-        target_names=labels_plot,
+        target_names=["Idle", "Healthy", "Zenker"],
     )
     if report_mc is not None:
         utils.save_json(
@@ -619,13 +665,13 @@ def run_fold(
     patient_vote: Dict[str, Any] = {}
     if compute_patient_metrics:
         p_yt_mean, p_yp_mean, p_pp_mean, _ = metrics.aggregate_by_patient_multiclass(
-            patient_ids=test_pids,
+            patient_ids=p_te,
             y_true=y_true.tolist(),
             y_proba=y_pred,
             method="mean_prob",
         )
         p_yt_vote, p_yp_vote, p_pp_vote, _ = metrics.aggregate_by_patient_multiclass(
-            patient_ids=test_pids,
+            patient_ids=p_te,
             y_true=y_true.tolist(),
             y_proba=y_pred,
             method="majority_vote",
@@ -645,7 +691,7 @@ def run_fold(
     metrics.save_confusion_matrix_png(
         y_true=y_true.tolist(),
         y_pred=y_pred_labels.tolist(),
-        labels=labels_plot,
+        labels=["Idle", "Healthy", "Zenker"],
         out_path=os.path.join(fold_dir, "confusion_snippet.png"),
         title=f"Fold {fold}",
     )
@@ -663,18 +709,26 @@ def run_fold(
         fold=fold,
         threshold_fixed=None,
         threshold_train_best=None,
+        threshold_best_effective=None,
         metrics_snippet_fixed=snippet,
         metrics_patient_fixed_mean=patient_mean,
         metrics_patient_fixed_vote=patient_vote,
         metrics_snippet_best=snippet,
         metrics_patient_best_mean=patient_mean,
         metrics_patient_best_vote=patient_vote,
+        report_snippet_fixed=report_mc,
+        report_snippet_best=report_mc,
     )
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--output_dir", required=True)
+    ap.add_argument(
+        "--existing_run_dir",
+        default=None,
+        help="If set, reuse an existing run dir (no new timestamp dir). Useful with --eval_only.",
+    )
     ap.add_argument("--run_name", default=None)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--n_folds", type=int, default=5)
@@ -694,6 +748,12 @@ def main() -> None:
     ap.add_argument("--patient-metrics", dest="patient_metrics", action="store_true")
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--dry-run", dest="dry_run", action="store_true")
+    ap.add_argument(
+        "--eval_only",
+        action="store_true",
+        help="Skip training and recompute metrics by loading foldX/model.keras from an existing run dir.",
+    )
+    ap.add_argument("--eval-only", dest="eval_only", action="store_true")
     args = ap.parse_args()
 
     tf = _require_tensorflow()
@@ -709,9 +769,14 @@ def main() -> None:
     utils.set_seed(int(args.seed))
     tf.random.set_seed(int(args.seed))
 
-    run_dir = utils.resolve_run_dir(args.output_dir, args.run_name)
+    run_dir = (
+        os.path.abspath(str(args.existing_run_dir))
+        if args.existing_run_dir is not None
+        else utils.resolve_run_dir(args.output_dir, args.run_name)
+    )
     logger = utils.setup_logger(os.path.join(run_dir, "train.log"))
-    utils.save_yaml(cfg, os.path.join(run_dir, "config_used.yaml"))
+    if not bool(args.eval_only):
+        utils.save_yaml(cfg, os.path.join(run_dir, "config_used.yaml"))
 
     predefined_dir = args.predefined_folds_dir
     if predefined_dir is None:
@@ -732,41 +797,18 @@ def main() -> None:
     )
 
     for fold in folds_to_run:
-        (x_tr, y_tr), val, (x_te, y_te) = data.load_predefined_fold_splits(
-            folds_dir=predefined_dir,
-            fold=fold,
-            task=task,
-            dry_run=bool(args.dry_run),
-        )
-
-        p_tr = [data.parse_patient_id(p) for p in x_tr]
-        p_te = [data.parse_patient_id(p) for p in x_te]
-
-        x_val: Optional[List[str]] = None
-        y_val: Optional[List[int]] = None
-        p_val: Optional[List[str]] = None
-        if val is not None:
-            x_val, y_val = val
-            p_val = [data.parse_patient_id(p) for p in x_val]
-
         fold_results.append(
             run_fold(
                 fold=fold,
-                train_wavs=x_tr,
-                train_y=y_tr,
-                train_pids=p_tr,
-                val_wavs=x_val,
-                val_y=y_val,
-                val_pids=p_val,
-                test_wavs=x_te,
-                test_y=y_te,
-                test_pids=p_te,
+                task=task,
+                predefined_dir=str(predefined_dir),
+                spectrogram_root=str(args.spectrogram_root),
                 cfg=cfg,
                 run_dir=run_dir,
-                spectrogram_root=str(args.spectrogram_root),
                 seed=int(args.seed),
+                dry_run=bool(args.dry_run),
                 compute_patient_metrics=bool(args.patient_metrics),
-                tf=tf,
+                eval_only=bool(args.eval_only),
             )
         )
 
@@ -803,6 +845,36 @@ def main() -> None:
                     "f1_macro"
                 )
             rows.append(row)
+
+    if task in ("binary_stage2", "binary_stage1"):
+        full_fixed = {
+            "rows": [
+                {
+                    "fold": fr.fold,
+                    "threshold": fr.threshold_fixed,
+                    "threshold_train_best": fr.threshold_train_best,
+                    "threshold_best_effective": fr.threshold_best_effective,
+                    "metrics": fr.metrics_snippet_fixed,
+                    "classification_report": fr.report_snippet_fixed,
+                }
+                for fr in fold_results
+            ]
+        }
+        full_best = {
+            "rows": [
+                {
+                    "fold": fr.fold,
+                    "threshold": fr.threshold_best_effective,
+                    "threshold_train_best": fr.threshold_train_best,
+                    "threshold_fixed": fr.threshold_fixed,
+                    "metrics": fr.metrics_snippet_best,
+                    "classification_report": fr.report_snippet_best,
+                }
+                for fr in fold_results
+            ]
+        }
+        utils.save_json(full_fixed, os.path.join(run_dir, "summary_full_fixed.json"))
+        utils.save_json(full_best, os.path.join(run_dir, "summary_full_best.json"))
 
     utils.save_json({"rows": rows}, os.path.join(run_dir, "summary.json"))
     try:
