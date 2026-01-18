@@ -768,6 +768,12 @@ def main():
         description="Train multiclass AST classifier (Idle/Healthy/Zenker) with CV"
     )
     parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Directory containing fold npy files (default: data_ast_cv).",
+    )
+    parser.add_argument(
         "--fold",
         type=int,
         help="Train only a specific fold (1-based). If omitted, trains all folds.",
@@ -861,6 +867,11 @@ def main():
         help="Custom output root directory (default: runs/ast_classifier_multiclass).",
     )
     args = parser.parse_args()
+
+    global DATA_DIR
+    if args.data_dir:
+        DATA_DIR = os.path.abspath(args.data_dir)
+        print(f"[Config] Using data dir: {DATA_DIR}")
 
     use_wandb = not args.no_wandb
     setattr(args, "wandb", use_wandb)
