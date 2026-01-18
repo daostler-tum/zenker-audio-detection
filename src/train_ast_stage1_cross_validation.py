@@ -105,6 +105,30 @@ FEATURE_EXTRACTOR_MEAN = -1.1509622
 FEATURE_EXTRACTOR_STD = 3.5340312
 
 
+def build_audio_augmentations(prob: float):
+    return Compose(
+        [
+            AddGaussianSNR(min_snr_db=10, max_snr_db=20),
+            Gain(min_gain_db=-6, max_gain_db=6),
+            GainTransition(
+                min_gain_db=-6,
+                max_gain_db=6,
+                min_duration=0.01,
+                max_duration=0.3,
+                duration_unit="fraction",
+            ),
+            ClippingDistortion(
+                min_percentile_threshold=0, max_percentile_threshold=30, p=0.5
+            ),
+            TimeStretch(min_rate=0.8, max_rate=1.2),
+            PitchShift(min_semitones=-4, max_semitones=4),
+            TimeMask(min_band_part=0.01, max_band_part=0.2),
+        ],
+        p=prob,
+        shuffle=True,
+    )
+
+
 def build_run_config(
     *,
     args: Any,
@@ -115,7 +139,9 @@ def build_run_config(
     run_id: str,
     run_started_at: datetime,
 ) -> Dict[str, Any]:
-    checkpoint_limit = 1 if dry_run else max(2, (NUM_EPOCHS + 1) // 4)
+    checkpoint_limit = 1
+    best_metric = args.best_model_metric
+    best_greater_is_better = best_metric not in ("eval_loss", "loss")
     return {
         "run_id": run_id,
         "timestamp": run_started_at.isoformat(),
@@ -124,7 +150,7 @@ def build_run_config(
         "pretrained_model": PRETRAINED_MODEL,
         "seed": SEED,
         "num_epochs": 1 if dry_run else NUM_EPOCHS,
-        "per_device_train_batch_size": 16,
+        "per_device_train_batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "optimizer": {
             "name": args.optim,
@@ -132,7 +158,18 @@ def build_run_config(
             "warmup_ratio": args.warmup_ratio,
             "adam_beta2": args.adam_beta2,
         },
+        "normalization": {
+            "mode": args.normalization_source,
+        },
+        "best_model": {
+            "metric": best_metric,
+            "greater_is_better": best_greater_is_better,
+        },
+        "augmentation": {
+            "probability": args.augmentation_prob,
+        },
         "loss": {
+            "use_focal_loss": (not args.no_focal_loss) and (args.focal_gamma > 0.0),
             "focal_gamma": args.focal_gamma,
             "label_smoothing": args.label_smoothing,
         },
@@ -259,7 +296,7 @@ def load_fold_normalization(fold: int):
                         print(
                             f"[Normalization] Using per-fold stats for fold {fold}: mean={entry['mean']:.6f} std={entry['std']:.6f}"
                         )
-                        return float(entry["mean"]), float(entry["std"])
+                        return float(entry["mean"]), float(entry["std"]), "per_fold"
         except Exception as e:
             print(
                 f"[Normalization] Failed reading per-fold stats ({e}); will try aggregate."
@@ -273,42 +310,94 @@ def load_fold_normalization(fold: int):
                 print(
                     f"[Normalization] Using aggregate stats: mean={agg['mean']:.6f} std={agg['std']:.6f}"
                 )
-                return float(agg["mean"]), float(agg["std"])
+                return float(agg["mean"]), float(agg["std"]), "aggregate"
         except Exception as e:
             print(
                 f"[Normalization] Failed reading aggregate stats ({e}); falling back to defaults."
             )
     print("[Normalization] Using hardcoded default stats.")
-    return FEATURE_EXTRACTOR_MEAN, FEATURE_EXTRACTOR_STD
+    return FEATURE_EXTRACTOR_MEAN, FEATURE_EXTRACTOR_STD, "default"
+
+
+def resolve_fold_normalization(
+    *,
+    fold: int,
+    mode: str,
+    feature_extractor: ASTFeatureExtractor,
+):
+    def _as_float(value: Any) -> float:
+        if isinstance(value, (list, tuple, np.ndarray)):
+            return float(value[0])
+        return float(value)
+
+    if mode == "pretrained":
+        return (
+            _as_float(feature_extractor.mean),
+            _as_float(feature_extractor.std),
+            "pretrained",
+        )
+
+    if mode == "default":
+        return FEATURE_EXTRACTOR_MEAN, FEATURE_EXTRACTOR_STD, "default"
+
+    if mode == "aggregate":
+        agg_path = os.path.join(DATA_DIR, "stats_aggregate.json")
+        if os.path.exists(agg_path):
+            try:
+                import json
+
+                with open(agg_path, "r") as f:
+                    agg = json.load(f)
+                if "mean" in agg and "std" in agg:
+                    print(
+                        f"[Normalization] Using aggregate stats: mean={agg['mean']:.6f} std={agg['std']:.6f}"
+                    )
+                    return float(agg["mean"]), float(agg["std"]), "aggregate"
+            except Exception as e:
+                print(
+                    f"[Normalization] Failed reading aggregate stats ({e}); falling back to defaults."
+                )
+        print("[Normalization] Aggregate stats missing; using hardcoded default stats.")
+        return FEATURE_EXTRACTOR_MEAN, FEATURE_EXTRACTOR_STD, "default"
+
+    if mode == "per_fold":
+        per_fold_path = os.path.join(DATA_DIR, "stats_per_fold.json")
+        if os.path.exists(per_fold_path):
+            try:
+                import json
+
+                with open(per_fold_path, "r") as f:
+                    entries = json.load(f)
+                if isinstance(entries, list):
+                    for entry in entries:
+                        if (
+                            isinstance(entry, dict)
+                            and entry.get("fold") == fold
+                            and "mean" in entry
+                            and "std" in entry
+                        ):
+                            print(
+                                f"[Normalization] Using per-fold stats for fold {fold}: mean={entry['mean']:.6f} std={entry['std']:.6f}"
+                            )
+                            return float(entry["mean"]), float(entry["std"]), "per_fold"
+            except Exception as e:
+                print(
+                    f"[Normalization] Failed reading per-fold stats ({e}); will try aggregate."
+                )
+        print(
+            f"[Normalization] Per-fold stats missing for fold {fold}; will try aggregate."
+        )
+        return resolve_fold_normalization(
+            fold=fold, mode="aggregate", feature_extractor=feature_extractor
+        )
+
+    return load_fold_normalization(fold)
 
 
 set_seed(SEED)
 
 class_labels = ClassLabel(names=["Idle", "Swallow"])  # index 0=Idle, 1=Swallow
 features = Features({"audio": Audio(), "labels": class_labels})
-
-# Augmentations
-audio_augmentations = Compose(
-    [
-        AddGaussianSNR(min_snr_db=10, max_snr_db=20),
-        Gain(min_gain_db=-6, max_gain_db=6),
-        GainTransition(
-            min_gain_db=-6,
-            max_gain_db=6,
-            min_duration=0.01,
-            max_duration=0.3,
-            duration_unit="fraction",
-        ),
-        ClippingDistortion(
-            min_percentile_threshold=0, max_percentile_threshold=30, p=0.5
-        ),
-        TimeStretch(min_rate=0.8, max_rate=1.2),
-        PitchShift(min_semitones=-4, max_semitones=4),
-        TimeMask(min_band_part=0.01, max_band_part=0.2),
-    ],
-    p=0.8,
-    shuffle=True,
-)
 
 accuracy = evaluate.load("accuracy")
 recall = evaluate.load("recall")
@@ -341,7 +430,12 @@ def compute_metrics(eval_pred):
     return metrics
 
 
-def build_datasets(fold: int, feature_extractor: ASTFeatureExtractor, dry_run: bool):
+def build_datasets(
+    fold: int,
+    feature_extractor: ASTFeatureExtractor,
+    dry_run: bool,
+    augmentation_prob: float,
+):
     train_x = np.load(os.path.join(DATA_DIR, f"train_x_fold{fold}.npy")).tolist()
     train_y = np.load(os.path.join(DATA_DIR, f"train_y_fold{fold}.npy")).tolist()
     test_x = np.load(os.path.join(DATA_DIR, f"test_x_fold{fold}.npy")).tolist()
@@ -387,12 +481,19 @@ def build_datasets(fold: int, feature_extractor: ASTFeatureExtractor, dry_run: b
             "audio", Audio(sampling_rate=SAMPLING_RATE)
         )
 
+    audio_augmentations = None
+    if augmentation_prob > 0.0:
+        audio_augmentations = build_audio_augmentations(augmentation_prob)
+
     # Preprocessing (batched map)
     def preprocess_train(batch):
-        wavs = [
-            audio_augmentations(a["array"], sample_rate=SAMPLING_RATE)
-            for a in batch["audio"]
-        ]
+        if audio_augmentations is None:
+            wavs = [a["array"] for a in batch["audio"]]
+        else:
+            wavs = [
+                audio_augmentations(a["array"], sample_rate=SAMPLING_RATE)
+                for a in batch["audio"]
+            ]
         out = feature_extractor(wavs, sampling_rate=SAMPLING_RATE, return_tensors="np")
         return {"input_values": out["input_values"]}
 
@@ -419,6 +520,9 @@ def train_fold(
     wandb_run=None,
     dry_run: bool = False,
     enable_early_stopping: bool = True,
+    batch_size: int = 16,
+    best_model_metric: str = "eval_loss",
+    normalization_mode: str = "auto",
     learning_rate: float = 5e-5,
     weight_decay: float = 0.0,
     warmup_ratio: float = 0.0,
@@ -426,6 +530,7 @@ def train_fold(
     optim_name: str = "adamw_torch_fused",
     focal_gamma: float = 0.0,
     label_smoothing: float = 0.0,
+    augmentation_prob: float = 0.8,
     config_file_path: str | None = None,
 ) -> Dict[str, float]:
     print(f"\n===== Stage1 Fold {fold} / {NUM_FOLDS} =====")
@@ -453,9 +558,35 @@ def train_fold(
             )
 
     feature_extractor = ASTFeatureExtractor.from_pretrained(PRETRAINED_MODEL)
-    mean, std = load_fold_normalization(fold)
+    mean, std, normalization_source = resolve_fold_normalization(
+        fold=fold, mode=normalization_mode, feature_extractor=feature_extractor
+    )
     feature_extractor.mean = mean
     feature_extractor.std = std
+
+    run_config_path = os.path.join(fold_output_dir, "run_config.json")
+    if os.path.exists(run_config_path):
+        try:
+            with open(run_config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            normalization_cfg = cfg.get("normalization")
+            if not isinstance(normalization_cfg, dict):
+                normalization_cfg = {}
+            normalization_cfg.update(
+                {
+                    "mode": normalization_mode,
+                    "mean": float(mean),
+                    "std": float(std),
+                    "source": normalization_source,
+                }
+            )
+            cfg["normalization"] = normalization_cfg
+            with open(run_config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, sort_keys=True)
+        except Exception as exc:
+            print(
+                f"[WARN] Failed to update normalization info in '{run_config_path}': {exc}"
+            )
 
     config = ASTConfig.from_pretrained(PRETRAINED_MODEL)
     config.num_labels = len(label2id)
@@ -465,13 +596,14 @@ def train_fold(
     model = ASTForAudioClassification.from_pretrained(
         PRETRAINED_MODEL, config=config, ignore_mismatched_sizes=True
     )
-    model.init_weights()
 
     dataset_train, dataset_val, dataset_test = build_datasets(
-        fold, feature_extractor, dry_run=dry_run
+        fold, feature_extractor, dry_run=dry_run, augmentation_prob=augmentation_prob
     )
 
-    checkpoint_limit = 1 if dry_run else max(2, (NUM_EPOCHS + 1) // 2)
+    checkpoint_limit = 1
+
+    best_greater_is_better = best_model_metric not in ("eval_loss", "loss")
 
     training_args = TrainingArguments(
         output_dir=fold_output_dir,
@@ -479,14 +611,15 @@ def train_fold(
         learning_rate=learning_rate,
         push_to_hub=False,
         num_train_epochs=1 if dry_run else NUM_EPOCHS,
-        per_device_train_batch_size=16,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
         eval_strategy="epoch",
         save_strategy="epoch",
         eval_steps=1,
         save_steps=1,
         load_best_model_at_end=True,
-        metric_for_best_model="f1",
-        greater_is_better=True,
+        metric_for_best_model=best_model_metric,
+        greater_is_better=best_greater_is_better,
         logging_strategy="steps",
         logging_steps=5 if dry_run else 20,
         seed=SEED,
@@ -675,6 +808,26 @@ def main():
         help="Fast sanity run (small subset, 1 epoch).",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Per-device batch size for training/eval (default: 16).",
+    )
+    parser.add_argument(
+        "--best-model-metric",
+        type=str,
+        default="eval_loss",
+        choices=["eval_loss", "loss", "f1", "accuracy", "precision", "recall"],
+        help="Metric used to select the best checkpoint (default: eval_loss).",
+    )
+    parser.add_argument(
+        "--normalization-source",
+        type=str,
+        default="auto",
+        choices=["auto", "per_fold", "aggregate", "default", "pretrained"],
+        help="Which normalization mean/std to use (default: auto).",
+    )
+    parser.add_argument(
         "--disable-early-stopping",
         action="store_true",
         help="Train full epoch schedule without early stopping.",
@@ -714,10 +867,21 @@ def main():
         help="Focal loss gamma parameter (0.0 = no focal loss, 2.0-5.0 typical). Helps with class imbalance.",
     )
     parser.add_argument(
+        "--no-focal-loss",
+        action="store_true",
+        help="Disable focal loss and use standard cross-entropy with label smoothing.",
+    )
+    parser.add_argument(
         "--label-smoothing",
         type=float,
         default=0.0,
         help="Label smoothing factor (0.0-0.3, default 0.0 = none). Reduces overconfidence.",
+    )
+    parser.add_argument(
+        "--augmentation-prob",
+        type=float,
+        default=0.8,
+        help="Probability of applying audio augmentations during training (default: 0.8).",
     )
     parser.add_argument(
         "--learning-rate",
@@ -738,14 +902,30 @@ def main():
     else:
         print("[Config] W&B logging disabled via --no-wandb.")
     setattr(args, "wandb", use_wandb)
+    if args.learning_rate <= 0:
+        raise ValueError("--learning-rate must be positive")
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be positive")
     if args.weight_decay < 0:
         raise ValueError("--weight-decay must be non-negative")
     if not (0.0 <= args.warmup_ratio < 1.0):
         raise ValueError("--warmup-ratio must be in [0.0, 1.0)")
     if not (0.0 < args.adam_beta2 < 1.0):
         raise ValueError("--adam-beta2 must be in (0.0, 1.0)")
-    missing = []
+    if not (0.0 <= args.augmentation_prob <= 1.0):
+        raise ValueError("--augmentation-prob must be in [0.0, 1.0]")
+
+    use_focal_loss = (not args.no_focal_loss) and (args.focal_gamma > 0.0)
+    focal_gamma_effective = args.focal_gamma if use_focal_loss else 0.0
+
+    if args.fold is not None:
+        if not (1 <= args.fold <= NUM_FOLDS):
+            raise ValueError(
+                f"--fold must be between 1 and {NUM_FOLDS}, got {args.fold}"
+            )
     target_folds = [args.fold] if args.fold else list(range(1, NUM_FOLDS + 1))
+    print(f"[Stage1] Selected folds: {target_folds} (requested fold={args.fold})")
+    missing = []
     for fold in target_folds:
         for prefix in ["train_x", "train_y", "test_x", "test_y"]:
             path = os.path.join(DATA_DIR, f"{prefix}_fold{fold}.npy")
@@ -841,10 +1021,21 @@ def main():
         )
     if dry_run:
         print("[DryRun] Enabled: limiting samples and epochs.")
+    best_greater_is_better = args.best_model_metric not in ("eval_loss", "loss")
     print(
-        f"[Config] Optimizer={args.optim} weight_decay={args.weight_decay} "
+        f"[Config] Optimizer={args.optim} lr={args.learning_rate} batch_size={args.batch_size} weight_decay={args.weight_decay} "
         f"warmup_ratio={args.warmup_ratio} beta2={args.adam_beta2}"
     )
+    print(f"[Config] Normalization mode={args.normalization_source}")
+    print(
+        f"[Config] Best model selection metric={args.best_model_metric} "
+        f"greater_is_better={best_greater_is_better}"
+    )
+    print(
+        f"[Config] Focal Loss={'ENABLED' if use_focal_loss else 'DISABLED'} "
+        f"gamma={args.focal_gamma} label_smoothing={args.label_smoothing}"
+    )
+    print(f"[Config] Augmentation prob={args.augmentation_prob}")
     for fold in target_folds:
         current_wandb_run = wandb_run
         if start_wandb_run is not None and args.wandb_per_fold:
@@ -868,13 +1059,17 @@ def main():
             wandb_run=current_wandb_run,
             dry_run=dry_run,
             enable_early_stopping=enable_early_stopping,
+            batch_size=args.batch_size,
+            best_model_metric=args.best_model_metric,
+            normalization_mode=args.normalization_source,
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
             warmup_ratio=args.warmup_ratio,
             adam_beta2=args.adam_beta2,
             optim_name=args.optim,
-            focal_gamma=args.focal_gamma,
+            focal_gamma=focal_gamma_effective,
             label_smoothing=args.label_smoothing,
+            augmentation_prob=args.augmentation_prob,
             config_file_path=config_path,
         )
         all_metrics.append(metrics)
