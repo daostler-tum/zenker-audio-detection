@@ -261,7 +261,7 @@ Key hyperparameters (optimized via random search):
 - Label smoothing: 0.09
 - Learning rate: 4e-5
 - Weight decay: 0.007
-- Warmup ratio: 0.14
+- Warmup ratio: 0.014
 - Optimizer: AdamW (fused) with β₂=0.976
 
 ### Training Options
@@ -368,6 +368,11 @@ python utils/analyze_ROC_PR_stage1.py --model-root models/my_experiment
 python utils/analyze_ROC_PR_stage2.py --model-root models/my_experiment
 ```
 
+e.g. model from ablation study:
+```bash
+python utils/analyze_ROC_PR_stage1.py --model-root-template "runs/ablations_stage1_A0_A3_20260111_073857/A1b_plus_focal_only_gamma2.0/fold{fold}/best" --plot-combined --plot --plot-dir figures_pub/A1b/ --plot-dpi 300 --plot-format both
+```
+
 ### Aggregate Results
 
 Combine results from patient-level inference:
@@ -408,6 +413,48 @@ python utils/extract_thresholds_per_fold.py \
     --output-config models/my_experiment/optimal_thresholds_per_fold.json
 ```
 This script optimizes the detection threshold based on validation F1 score per fold. This can then be passed to the `src/run_batch_simple_2stage.py` or `src/run_all_folds_simple_batch.sh`.
+
+## Ablation Studies
+
+### Run ablation study
+Run stage 1 ablation study:
+
+```bash
+bash utils/run_stage1_ablation_study.sh
+```
+
+Run stage 2 ablation study:
+
+```bash
+bash utils/run_stage2_ablation_study.sh
+```
+### Create caches and inference runs: 
+
+e.g.
+```bash
+MODEL_DIR_STAGE1=... path_to_stage1_ablation_run.../runs/ablations_stage1_A0_A3_20260111_073857 \
+MODEL_NAME_STAGE1=A2_plus_aug_p0.8_plus_focal_gamma2.0 \
+MODEL_DIR_STAGE2=... path_to_stage2_ablation_run.../runs/ablations_stage2_A0_A3_20260111_015844 \
+MODEL_NAME_STAGE2=A2_plus_aug_p0.8_plus_focal_gamma2.0 \
+LONG_AUDIO_ROOT=... path_to_long_audio_root.../New_SwallowSet/Long \
+EXPERIMENT_TAG=ablation_study PIPELINE_TAG=s1A2_s2A2 \
+bash utils/run_export_window_probs_testset_mixed.sh
+```
+
+### Analyze ablation study
+
+
+```bash
+python analysis/threshold_sweep/summarize_patient_level_zsr.py   --long-audio-root ... path_to_long_audio_root.../New_SwallowSet/Long   --cache-root ... path_to_cache_root.../caches/ablation_study   --pipelines s1A1b_s2A1b   --t1 0.5 --t2 0.5 --tzsr 0.5
+```
+#### Plotting of zsr sweep
+
+```bash
+python analysis/threshold_sweep/plot_zsr_sweep_metrics.py \
+  --results-root analysis/outputs/patient_level_zsr \
+  --pipelines s1A1b_s2A1b \
+  --t1-values 0.5 --t2-values 0.5 \
+```
 
 ## Ethics and Data Availability
 

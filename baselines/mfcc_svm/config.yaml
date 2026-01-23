@@ -1,0 +1,23 @@
+task: binary_stage2
+predefined_folds_dir: null
+folds_dir_default: data_ast_stage2
+n_mfcc: 20
+include_deltas: true
+sample_rate: 16000
+clip_duration_s: 1.0
+n_fft: 1024
+hop_length: 256
+svm:
+  class_weight: balanced
+  probability: true
+  grid_search: true
+  param_grid:
+    C: [1.0, 10.0]
+    gamma: [scale, 0.1]
+patient_aggregation:
+  threshold: 0.5
+  methods: [mean_prob, majority_vote]
+threshold_tuning:
+  enabled: true
+  metric: f1
+  use_training_predictions: true

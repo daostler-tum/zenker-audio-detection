@@ -1,0 +1,22 @@
+task: binary_stage2
+sample_rate: 16000
+clip_duration_s: 1.0
+mel:
+  n_mels: 64
+  n_fft: 1024
+  hop_length: 256
+train:
+  batch_size: 64
+  num_epochs: 30
+  lr: 0.001
+  weight_decay: 0.0001
+  patience: 5
+  num_workers: 0
+  device: auto
+augmentation:
+  enabled: true
+  time_mask: 0.1
+  freq_mask: 0.1
+patient_aggregation:
+  threshold: 0.5
+  methods: [mean_prob, majority_vote]
