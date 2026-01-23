@@ -14,7 +14,7 @@ What this script does
 
 Example
     python analysis_confounds.py \
-        --csv Zenker_Paper_ID_Age_Analysis.csv \
+        --csv Zenker_ID_Age_Analysis.csv \
         --threshold 0.5 \
         --age-cut 60 \
         --outdir outputs \
